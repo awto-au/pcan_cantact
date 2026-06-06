@@ -25,6 +25,7 @@ static struct
     uint8_t   ecc;
     uint8_t   rx_err;
     uint8_t   tx_err;
+    uint8_t   rxqovr_count; /* saturating count of RX queue overflows since last REC_ANALOG emission */
     /* config */
     uint8_t   btr0;
     uint8_t   btr1;
@@ -323,6 +324,7 @@ static void pcan_rx_can_frame( PCAN_RECORD_BUFFER_EX *prec, const can_message_t 
     if( !pcan_record_buffer_flush( prec ) )
     {
       pcan_device.can.err |= PCAN_USB_ERROR_RXQOVR;
+      if( pcan_device.can.rxqovr_count < 255 ) pcan_device.can.rxqovr_count++;
       return;
     }
     ptr = pcan_record_buffer_request( prec, BUFFER_MINIMAL_GAP_SIZE );
@@ -558,6 +560,36 @@ static void pcan_set_bitrate( uint8_t *ptr )
 }
 
 
+/* emit REC_ANALOG telemetry record: payload[0]=buffer fill %, payload[1]=RXQOVR count */
+static void pcan_analog_event( PCAN_RECORD_BUFFER_EX *prec )
+{
+  uint8_t *ptr, pos = 0;
+  uint8_t fill_pct = (uint8_t)( (uint32_t)prec->pos * 100u / PCAN_MAX_RECORD_SIZE );
+
+  ptr = pcan_record_buffer_request( prec, 5 );
+  if( !ptr )
+    return;
+
+  pack_u8( ptr, PCAN_USB_STATUSLEN_INTERNAL | 2 );
+  ptr += 1; pos += 1;
+
+  pack_u8( ptr, PCAN_USB_REC_ANALOG ); /* function */
+  ptr += 1; pos += 1;
+
+  pack_u8( ptr, 0 ); /* number */
+  ptr += 1; pos += 1;
+
+  pack_u8( ptr, fill_pct ); /* payload[0]: buffer fill % at time of emission */
+  ptr += 1; pos += 1;
+
+  pack_u8( ptr, pcan_device.can.rxqovr_count ); /* payload[1]: RXQOVR count since last emission */
+  ptr += 1; pos += 1;
+
+  pcan_device.can.rxqovr_count = 0;
+
+  pcan_record_buffer_commit( prec, pos );
+}
+
 /* create */
 void pcan_timesync_event( PCAN_RECORD_BUFFER_EX *prec )
 {
@@ -617,6 +649,10 @@ void pcan_timesync_event( PCAN_RECORD_BUFFER_EX *prec )
 
   /* clean errors */
   pcan_device.can.err = 0x00;
+
+  /* emit analog telemetry (ignored by both Linux and Windows drivers, repurposed
+   * to carry debug metrics: buffer fill % and RXQOVR count) */
+  pcan_analog_event( prec );
 }
 
 void pcan_protocol_process_command( uint8_t *ptr, uint16_t size )
